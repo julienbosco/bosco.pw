@@ -1,0 +1,65 @@
+networks:
+  web:
+    external: true
+
+services:
+  reverse-proxy:
+    image: traefik:latest
+    container_name: "traefik"
+    networks:
+      - web
+    ports:
+      - "443:443"
+      - "80:80"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./letsencrypt:/letsencrypt
+      - ./traefik:/etc/traefik
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.dashboard.rule=Host(`traefik.bosco.pw`)"
+      - "traefik.http.routers.dashboard.service=api@internal"
+      - "traefik.http.routers.dashboard.middlewares=auth"
+      - "traefik.http.routers.dashboard.entrypoints=websecure"
+      - "traefik.http.routers.dashboard.tls.certresolver=myresolver"
+      - "traefik.http.middlewares.auth.basicauth.usersFile=/etc/traefik/users"
+  traefik-certs-dumper:
+    container_name: "tcd"
+    image: ldez/traefik-certs-dumper:v2.7.4
+    entrypoint: sh -c '
+      apk add jq
+      ; while ! [ -e /data/acme.json ]
+      || ! [ `jq ".[] | .Certificates | length" /data/acme.json` != 0 ]; do
+      sleep 1
+      ; done
+      && traefik-certs-dumper file --version v2 --watch
+      --source /data/acme.json --dest /dump --domain-subdir=true'
+    networks:
+      - web
+    volumes:
+      - ./letsencrypt:/data
+      - ./tlsdump:/dump
+  vault:
+    image: vault:1.7.1
+    container_name: "tgevault"
+    deponds_on:
+      - traefik-certs-dumper"
+    expose:
+      - 8200
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.vault.rule=Host(`vault.bosco.pw`)"
+      - "traefik.http.routers.vault.entrypoints=websecure"
+      - "traefik.http.routers.vault.tls.certresolver=myresolver"
+      - "traefik,http.services.vault.loadbalencer.server.port=8200"
+    restart: on-failure:10
+    networks:
+      - web
+    volumes:
+      - ./vault/logs:/vault/logs
+      - ./vault/file:/vault/file
+      - .vault/config:/vault/config
+      - ./tlsdump/vault.bosco.pw:/vault/tls
+    cap_add:
+      - IPC_LOCK
+    entrypoint: vault server -config=/vault/config/config.hcl
